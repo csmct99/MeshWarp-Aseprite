@@ -1,18 +1,12 @@
----------------------------------------------------
--- MeshWarp.lua
--- https://github.com/csmct99/MeshWarp-Aseprite
--- v1.0
----------------------------------------------------
-
 -- Global Constants
 local CanvasSize = 450
 local WorkAreaSize = 250
 local HandleRadius = 5
 
--- Resolves the horizontal axis coordinate during inverse bilinear interpolation
+-- Resolves the horizontal axis coordinate during inverse bilinear interpolation.
 local function calculateHorizontalAxis(pointDiffX, pointDiffY, edgeX1, edgeY1, edgeX2, edgeY2, crossEdgeX, crossEdgeY, verticalPosition)
-    -- Expands the bilinear equation to solve for the horizontal fraction
-    -- We pick the axis with the larger denominator to maximize floating-point precision and prevent division by zero
+    -- Expands the bilinear equation to solve for the horizontal fraction.
+    -- We pick the axis with the larger denominator to maximize floating-point precision and prevent division by zero.
     local denominatorX = edgeX1 + crossEdgeX * verticalPosition
     local denominatorY = edgeY1 + crossEdgeY * verticalPosition
     
@@ -24,7 +18,7 @@ local function calculateHorizontalAxis(pointDiffX, pointDiffY, edgeX1, edgeY1, e
     end
 end
 
--- Maps a point inside an arbitrary quadrilateral to normalized (u, v) space
+-- Maps a point inside an arbitrary quadrilateral to normalized (u, v) space.
 local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, point4)
     local edgeX1 = point2.x - point1.x
     local edgeY1 = point2.y - point1.y
@@ -35,7 +29,8 @@ local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, 
     local pointDiffX = pointX - point1.x
     local pointDiffY = pointY - point1.y
 
-    -- Coefficients are derived from the 2D cross products of the quads edges
+    -- The inverse bilinear mapping resolves to a quadratic equation: A*v^2 + B*v + C = 0.
+    -- These coefficients are derived from the 2D cross products of the quad's edges.
     local coeffA = crossEdgeX * edgeY2 - crossEdgeY * edgeX2
     local coeffB = edgeX1 * edgeY2 - edgeY1 * edgeX2 + pointDiffX * crossEdgeY - pointDiffY * crossEdgeX
     local coeffC = pointDiffX * edgeY1 - pointDiffY * edgeX1
@@ -43,12 +38,12 @@ local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, 
     local horizontalPosition, verticalPosition
 
     if math.abs(coeffA) < 0.000001 then
-        -- Fallback for linear cases (eg: the quad is a perfect parallelogram) where the quadratic term approaches zero
+        -- Fallback for linear cases (e.g., the quad is a perfect parallelogram) where the quadratic term approaches zero.
         if math.abs(coeffB) < 0.000001 then return nil, nil end
         verticalPosition = -coeffC / coeffB
         horizontalPosition = calculateHorizontalAxis(pointDiffX, pointDiffY, edgeX1, edgeY1, edgeX2, edgeY2, crossEdgeX, crossEdgeY, verticalPosition)
     else
-        -- Calculate both roots of the quadratic equation using the standard quadratic formula
+        -- Calculate both roots of the quadratic equation using the standard quadratic formula.
         local discriminant = coeffB * coeffB - 4.0 * coeffC * coeffA
         if discriminant < 0.0 then return nil, nil end
         
@@ -60,7 +55,7 @@ local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, 
         local vertical2 = (-coeffB + discriminantRoot) / (2.0 * coeffA)
         local horizontal2 = calculateHorizontalAxis(pointDiffX, pointDiffY, edgeX1, edgeY1, edgeX2, edgeY2, crossEdgeX, crossEdgeY, vertical2)
 
-        -- Select the root that falls within the valid [0, 1] bounds of the quadrilateral
+        -- Select the root that falls within the valid [0, 1] bounds of the quadrilateral.
         horizontalPosition, verticalPosition = horizontal1, vertical1
         if verticalPosition < -0.001 or verticalPosition > 1.001 or horizontalPosition < -0.001 or horizontalPosition > 1.001 then
             horizontalPosition, verticalPosition = horizontal2, vertical2
@@ -74,8 +69,8 @@ local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, 
     return nil, nil
 end
 
--- Maps an output pixel to a specific source coordinate within an arbitrary N x N grid structure
--- Uses AABB boundary culling to ensure high grid resolutions remain (mostly) performant 
+-- Maps an output pixel to a specific source coordinate within an arbitrary N x N grid structure.
+-- Employs AABB boundary culling to ensure high grid resolutions remain performant.
 local function findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceWidth, sourceHeight)
     local quadWidth = sourceWidth / gridResolution
     local quadHeight = sourceHeight / gridResolution
@@ -93,8 +88,8 @@ local function findSourceCoordinate(worldX, worldY, destinationPoints, gridResol
             local point3 = destinationPoints[index3]
             local point4 = destinationPoints[index4]
             
-            -- Fast AABB culling. 
-            -- Avoids running the heavy inverse bilinear math if the pixel is completely outside this specific grid cell
+            -- Fast Axis-Aligned Bounding Box (AABB) culling. 
+            -- Avoids running the heavy inverse bilinear math if the pixel is completely outside this specific grid cell.
             local minimumX = math.min(point1.x, point2.x, point3.x, point4.x)
             local maximumX = math.max(point1.x, point2.x, point3.x, point4.x)
             local minimumY = math.min(point1.y, point2.y, point3.y, point4.y)
@@ -112,7 +107,7 @@ local function findSourceCoordinate(worldX, worldY, destinationPoints, gridResol
     return nil, nil
 end
 
--- Rebuilds the distortion grid to a new resolution while preserving the current perspective layout
+-- Rebuilds the distortion grid to a new resolution while preserving the current perspective layout.
 local function recalculateGridPoints(previousPoints, oldResolution, newResolution)
     local updatedPoints = {}
     local pointsPerRow = oldResolution + 1
@@ -141,8 +136,8 @@ local function recalculateGridPoints(previousPoints, oldResolution, newResolutio
             local point3 = previousPoints[index3]
             local point4 = previousPoints[index4]
             
-            -- Standard forward bilinear interpolation
-            -- Maps the normalized sub-grid coordinate to the actual global coordinate space of the parent quad
+            -- Standard forward bilinear interpolation.
+            -- Maps the normalized sub-grid coordinate to the actual global coordinate space of the parent quad.
             local topEdgeX = point1.x + (point2.x - point1.x) * quadFractionX
             local topEdgeY = point1.y + (point2.y - point1.y) * quadFractionX
             
@@ -159,7 +154,7 @@ local function recalculateGridPoints(previousPoints, oldResolution, newResolutio
     return updatedPoints
 end
 
--- Extracts the RGBA components of a pixel, converting natively across all color modes
+-- Extracts the RGBA components of a pixel, converting natively across all Aseprite color modes.
 local function extractPixelRgba(image, xCoord, yCoord, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
     if xCoord < 0 or xCoord >= image.width or yCoord < 0 or yCoord >= image.height then
         return 0, 0, 0, 0
@@ -179,8 +174,8 @@ local function extractPixelRgba(image, xCoord, yCoord, isIndexed, palette, trans
     end
 end
 
--- Samples a sub-pixel fractional coordinate using a 4-point bilinear interpolation blend
--- Utilizes pre-multiplied alpha weighting to prevent dark fringing on transparent edges
+-- Samples a sub-pixel fractional coordinate using a 4-point bilinear interpolation blend.
+-- Utilizes pre-multiplied alpha weighting to prevent dark fringing on transparent edges.
 local function getBilinearSampledColor(image, sourceX, sourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
     sourceX = sourceX - 0.5
     sourceY = sourceY - 0.5
@@ -198,8 +193,8 @@ local function getBilinearSampledColor(image, sourceX, sourceY, isIndexed, palet
     local redBottomLeft, greenBottomLeft, blueBottomLeft, alphaBottomLeft = extractPixelRgba(image, leftX, bottomY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
     local redBottomRight, greenBottomRight, blueBottomRight, alphaBottomRight = extractPixelRgba(image, rightX, bottomY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
     
-    -- Calculate area weights for the four neighboring pixel
-    -- As the fractional position moves closer to a pixel's center, its corresponding weight approaches 1.0
+    -- Calculate area weights for the four neighboring pixels.
+    -- As the fractional position moves closer to a pixel's center, its corresponding weight approaches 1.0.
     local weightTopLeft = (1 - fractionX) * (1 - fractionY)
     local weightTopRight = fractionX * (1 - fractionY)
     local weightBottomLeft = (1 - fractionX) * fractionY
@@ -215,7 +210,7 @@ local function getBilinearSampledColor(image, sourceX, sourceY, isIndexed, palet
     return pixelColorTools.rgba(math.floor(blendedRed + 0.5), math.floor(blendedGreen + 0.5), math.floor(blendedBlue + 0.5), math.floor(blendedAlpha + 0.5))
 end
 
--- Unified handler that processes the dynamic destination layout and plots mapped source pixels
+-- Unified handler that processes the dynamic destination layout and plots mapped source pixels.
 local function renderDistortedImage(sourceImage, destinationPoints, gridResolution, previewAlpha, samplingMode, renderScale)
     renderScale = renderScale or 1.0
     
@@ -290,7 +285,7 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
     return outputImage, Point(minimumX, minimumY)
 end
 
--- Helper utility to draw primitive rectangles representing interaction handles
+-- Helper utility to draw primitive rectangles representing interaction handles.
 local function drawInteractiveHandle(graphicsContext, x, y, size, fillColor, strokeColor)
     graphicsContext:beginPath()
     graphicsContext:moveTo(x, y)
@@ -305,7 +300,7 @@ local function drawInteractiveHandle(graphicsContext, x, y, size, fillColor, str
     graphicsContext:stroke()
 end
 
--- Renders a generic transparency checkerboard bounded to the UI frame
+-- Renders a generic transparency checkerboard bounded to the UI frame.
 local function drawTransparencyCheckerboard(graphicsContext, x, y, width, height, checkerSize)
     local colorDark = Color{r=60, g=60, b=60}
     local colorLight = Color{r=80, g=80, b=80}
@@ -343,7 +338,7 @@ local function drawTransparencyCheckerboard(graphicsContext, x, y, width, height
     end
 end
 
--- Erases the selected pixels from the provided image before plotting the new distortion
+-- Erases the selected pixels from the provided image before plotting the new distortion.
 local function clearSelectedPixels(targetImage, sprite, selection, bounds, celPosition)
     local backgroundColor = (sprite.colorMode == ColorMode.INDEXED) and sprite.transparentColor or Color{r=0, g=0, b=0, a=0}
     for y = bounds.y, bounds.y + bounds.height - 1 do
@@ -358,7 +353,7 @@ local function clearSelectedPixels(targetImage, sprite, selection, bounds, celPo
     end
 end
 
--- The main entry point for the extension
+-- The main entry point for the extension.
 local function initializeMeshWarpTool()
     local sprite = app.activeSprite
     local cel = app.activeCel
@@ -375,41 +370,41 @@ local function initializeMeshWarpTool()
     local sourceImage = Image(sourceBounds.width, sourceBounds.height, sprite.colorMode)
     sourceImage:drawImage(cel.image, Point(-(sourceBounds.x - cel.bounds.x), -(sourceBounds.y - cel.bounds.y)))
 
-    local _showContext = true
-    local _viewBox = Rectangle()
-    local _viewScale = 1
-    local _viewOffsetX = 0
-    local _viewOffsetY = 0
+    local showContext = true
+    local viewBox = Rectangle()
+    local viewScale = 1
+    local viewOffsetX = 0
+    local viewOffsetY = 0
     
-    local _currentGridResolution = 2
-    local _samplingMode = "Nearest Neighbor"
+    local currentGridResolution = 2
+    local samplingMode = "Nearest Neighbor"
 
-    local _cameraZoom = 1.0
-    local _cameraPanX = 0
-    local _cameraPanY = 0
-    local _isPanning = false
-    local _lastMouseX = 0
-    local _lastMouseY = 0
+    local cameraZoom = 1.0
+    local cameraPanX = 0
+    local cameraPanY = 0
+    local isPanning = false
+    local lastMouseX = 0
+    local lastMouseY = 0
 
-    local _destinationPoints = {}
-    for row = 0, _currentGridResolution do
-        for column = 0, _currentGridResolution do
-            table.insert(_destinationPoints, {
-                x = sourceBounds.x + (column / _currentGridResolution) * sourceBounds.width,
-                y = sourceBounds.y + (row / _currentGridResolution) * sourceBounds.height
+    local destinationPoints = {}
+    for row = 0, currentGridResolution do
+        for column = 0, currentGridResolution do
+            table.insert(destinationPoints, {
+                x = sourceBounds.x + (column / currentGridResolution) * sourceBounds.width,
+                y = sourceBounds.y + (row / currentGridResolution) * sourceBounds.height
             })
         end
     end
 
-    local _activePointIndex = 0
-    local _isDragging = false
-    local _needsUpdate = true
-    local _previewImage = nil
-    local _previewOffset = Point(0,0)
+    local activePointIndex = 0
+    local isDragging = false
+    local needsUpdate = true
+    local previewImage = nil
+    local previewOffset = Point(0,0)
 
-    local _rawContextImage = nil
-    local _scaledContextImage = nil
-    local _lastContextScale = 0
+    local rawContextImage = nil
+    local scaledContextImage = nil
+    local lastContextScale = 0
 
     app.transaction("Temp Capture Context", function()
         local tempCelImage = cel.image:clone()
@@ -417,32 +412,32 @@ local function initializeMeshWarpTool()
         cel.image = tempCelImage
     end)
     
-    _rawContextImage = Image(sprite.width, sprite.height, sprite.colorMode)
-    _rawContextImage:drawSprite(sprite, app.activeFrame)
+    rawContextImage = Image(sprite.width, sprite.height, sprite.colorMode)
+    rawContextImage:drawSprite(sprite, app.activeFrame)
     app.undo()
 
     local function updateViewMetrics()
-        if _showContext then
-            _viewBox = Rectangle(0, 0, sprite.width, sprite.height)
+        if showContext then
+            viewBox = Rectangle(0, 0, sprite.width, sprite.height)
         else
-            _viewBox = sourceBounds
+            viewBox = sourceBounds
         end
-        _viewScale = WorkAreaSize / math.max(_viewBox.width, _viewBox.height)
-        _viewOffsetX = (CanvasSize - (_viewBox.width * _viewScale)) / 2
-        _viewOffsetY = (CanvasSize - (_viewBox.height * _viewScale)) / 2
-        _needsUpdate = true
+        viewScale = WorkAreaSize / math.max(viewBox.width, viewBox.height)
+        viewOffsetX = (CanvasSize - (viewBox.width * viewScale)) / 2
+        viewOffsetY = (CanvasSize - (viewBox.height * viewScale)) / 2
+        needsUpdate = true
     end
 
     local function globalToUi(globalX, globalY)
-        local baseUiX = _viewOffsetX + (globalX - _viewBox.x) * _viewScale
-        local baseUiY = _viewOffsetY + (globalY - _viewBox.y) * _viewScale
+        local baseUiX = viewOffsetX + (globalX - viewBox.x) * viewScale
+        local baseUiY = viewOffsetY + (globalY - viewBox.y) * viewScale
         
         local centerX = CanvasSize / 2
         local centerY = CanvasSize / 2
         
-        -- Translate to the center of the canvas, apply the zoom and pan camera offsets, and translate back
-        local finalUiX = (baseUiX - centerX + _cameraPanX) * _cameraZoom + centerX
-        local finalUiY = (baseUiY - centerY + _cameraPanY) * _cameraZoom + centerY
+        -- Translate to the center of the canvas, apply the zoom and pan camera offsets, and translate back.
+        local finalUiX = (baseUiX - centerX + cameraPanX) * cameraZoom + centerX
+        local finalUiY = (baseUiY - centerY + cameraPanY) * cameraZoom + centerY
         return finalUiX, finalUiY
     end
 
@@ -450,32 +445,32 @@ local function initializeMeshWarpTool()
         local centerX = CanvasSize / 2
         local centerY = CanvasSize / 2
         
-        local baseUiX = (uiX - centerX) / _cameraZoom + centerX - _cameraPanX
-        local baseUiY = (uiY - centerY) / _cameraZoom + centerY - _cameraPanY
+        local baseUiX = (uiX - centerX) / cameraZoom + centerX - cameraPanX
+        local baseUiY = (uiY - centerY) / cameraZoom + centerY - cameraPanY
         
-        local globalX = _viewBox.x + (baseUiX - _viewOffsetX) / _viewScale
-        local globalY = _viewBox.y + (baseUiY - _viewOffsetY) / _viewScale
+        local globalX = viewBox.x + (baseUiX - viewOffsetX) / viewScale
+        local globalY = viewBox.y + (baseUiY - viewOffsetY) / viewScale
         return globalX, globalY
     end
 
     local function getScaledContext()
-        if not _scaledContextImage or _lastContextScale ~= _viewScale then
-            local scaledWidth = math.max(1, math.floor(sprite.width * _viewScale))
-            local scaledHeight = math.max(1, math.floor(sprite.height * _viewScale))
-            _scaledContextImage = Image(scaledWidth, scaledHeight, sprite.colorMode)
+        if not scaledContextImage or lastContextScale ~= viewScale then
+            local scaledWidth = math.max(1, math.floor(sprite.width * viewScale))
+            local scaledHeight = math.max(1, math.floor(sprite.height * viewScale))
+            scaledContextImage = Image(scaledWidth, scaledHeight, sprite.colorMode)
             
             for y = 0, scaledHeight - 1 do
                 for x = 0, scaledWidth - 1 do
-                    local sourceX = math.floor(x / _viewScale)
-                    local sourceY = math.floor(y / _viewScale)
+                    local sourceX = math.floor(x / viewScale)
+                    local sourceY = math.floor(y / viewScale)
                     if sourceX >= 0 and sourceX < sprite.width and sourceY >= 0 and sourceY < sprite.height then
-                        _scaledContextImage:drawPixel(x, y, _rawContextImage:getPixel(sourceX, sourceY))
+                        scaledContextImage:drawPixel(x, y, rawContextImage:getPixel(sourceX, sourceY))
                     end
                 end
             end
-            _lastContextScale = _viewScale
+            lastContextScale = viewScale
         end
-        return _scaledContextImage
+        return scaledContextImage
     end
 
     updateViewMetrics()
@@ -486,14 +481,14 @@ local function initializeMeshWarpTool()
         label = "Grid Size:",
         min = 1,
         max = 6,
-        value = _currentGridResolution,
+        value = currentGridResolution,
         onchange = function()
             local newResolution = dialog.data.gridResolution
-            if newResolution ~= _currentGridResolution then
-                _destinationPoints = recalculateGridPoints(_destinationPoints, _currentGridResolution, newResolution)
-                _currentGridResolution = newResolution
-                _activePointIndex = 0
-                _needsUpdate = true
+            if newResolution ~= currentGridResolution then
+                destinationPoints = recalculateGridPoints(destinationPoints, currentGridResolution, newResolution)
+                currentGridResolution = newResolution
+                activePointIndex = 0
+                needsUpdate = true
                 dialog:repaint()
             end
         end
@@ -506,7 +501,7 @@ local function initializeMeshWarpTool()
         max = 100,
         value = 100,
         onchange = function()
-            _needsUpdate = true
+            needsUpdate = true
             dialog:repaint()
         end
     }
@@ -514,11 +509,11 @@ local function initializeMeshWarpTool()
     dialog:combobox {
         id = "samplingMode",
         label = "Sampling:",
-        option = _samplingMode,
+        option = samplingMode,
         options = { "Nearest Neighbor", "Bilinear" },
         onchange = function()
-            _samplingMode = dialog.data.samplingMode
-            _needsUpdate = true
+            samplingMode = dialog.data.samplingMode
+            needsUpdate = true
             dialog:repaint()
         end
     }
@@ -530,7 +525,7 @@ local function initializeMeshWarpTool()
         max = 255,
         value = 255,
         onchange = function()
-            _needsUpdate = true
+            needsUpdate = true
             dialog:repaint()
         end
     }
@@ -545,13 +540,13 @@ local function initializeMeshWarpTool()
             graphicsContext.color = Color{r=40, g=40, b=40}
             graphicsContext:fillRect(Rectangle(0, 0, CanvasSize, CanvasSize))
 
-            local backgroundX, backgroundY = globalToUi(_viewBox.x, _viewBox.y)
-            local backgroundRight, backgroundBottom = globalToUi(_viewBox.x + _viewBox.width, _viewBox.y + _viewBox.height)
+            local backgroundX, backgroundY = globalToUi(viewBox.x, viewBox.y)
+            local backgroundRight, backgroundBottom = globalToUi(viewBox.x + viewBox.width, viewBox.y + viewBox.height)
             local backgroundWidth = backgroundRight - backgroundX
             local backgroundHeight = backgroundBottom - backgroundY
 
-            drawTransparencyCheckerboard(graphicsContext, backgroundX, backgroundY, backgroundWidth, backgroundHeight, 10 * _cameraZoom)
-            if _showContext then
+            drawTransparencyCheckerboard(graphicsContext, backgroundX, backgroundY, backgroundWidth, backgroundHeight, 10 * cameraZoom)
+            if showContext then
                 local contextImage = getScaledContext()
                 graphicsContext:drawImage(
                     contextImage, 
@@ -564,17 +559,17 @@ local function initializeMeshWarpTool()
             local currentScale = (dialog.data and dialog.data.previewScale) or 100
             local renderScale = currentScale / 100.0
 
-            if _needsUpdate then
-                _previewImage, _previewOffset = renderDistortedImage(sourceImage, _destinationPoints, _currentGridResolution, currentAlpha, _samplingMode, renderScale)
-                _needsUpdate = false
+            if needsUpdate then
+                previewImage, previewOffset = renderDistortedImage(sourceImage, destinationPoints, currentGridResolution, currentAlpha, samplingMode, renderScale)
+                needsUpdate = false
             end
 
-            if _previewImage then
+            if previewImage then
                 local drawScale = 1.0 / renderScale
-                local mathGlobalX = _previewOffset.x
-                local mathGlobalY = _previewOffset.y
-                local mathGlobalWidth = _previewImage.width * drawScale
-                local mathGlobalHeight = _previewImage.height * drawScale
+                local mathGlobalX = previewOffset.x
+                local mathGlobalY = previewOffset.y
+                local mathGlobalWidth = previewImage.width * drawScale
+                local mathGlobalHeight = previewImage.height * drawScale
                 
                 local previewUiX, previewUiY = globalToUi(mathGlobalX, mathGlobalY)
                 local previewUiRight, previewUiBottom = globalToUi(mathGlobalX + mathGlobalWidth, mathGlobalY + mathGlobalHeight)
@@ -585,21 +580,21 @@ local function initializeMeshWarpTool()
                 local drawHeight = math.max(1, math.floor(previewUiBottom - previewUiY + 0.5))
                 
                 graphicsContext:drawImage(
-                    _previewImage, 
-                    Rectangle(0, 0, _previewImage.width, _previewImage.height), 
+                    previewImage, 
+                    Rectangle(0, 0, previewImage.width, previewImage.height), 
                     Rectangle(drawX, drawY, drawWidth, drawHeight)
                 )
             end
 
             graphicsContext.color = Color{r=200, g=200, b=200}
-            local pointsPerRow = _currentGridResolution + 1
+            local pointsPerRow = currentGridResolution + 1
             
-            for row = 0, _currentGridResolution do
-                for column = 0, _currentGridResolution - 1 do
+            for row = 0, currentGridResolution do
+                for column = 0, currentGridResolution - 1 do
                     local index1 = row * pointsPerRow + column + 1
                     local index2 = index1 + 1
-                    local uiX1, uiY1 = globalToUi(_destinationPoints[index1].x, _destinationPoints[index1].y)
-                    local uiX2, uiY2 = globalToUi(_destinationPoints[index2].x, _destinationPoints[index2].y)
+                    local uiX1, uiY1 = globalToUi(destinationPoints[index1].x, destinationPoints[index1].y)
+                    local uiX2, uiY2 = globalToUi(destinationPoints[index2].x, destinationPoints[index2].y)
                     graphicsContext:beginPath()
                     graphicsContext:moveTo(uiX1, uiY1)
                     graphicsContext:lineTo(uiX2, uiY2)
@@ -607,12 +602,12 @@ local function initializeMeshWarpTool()
                 end
             end
             
-            for column = 0, _currentGridResolution do
-                for row = 0, _currentGridResolution - 1 do
+            for column = 0, currentGridResolution do
+                for row = 0, currentGridResolution - 1 do
                     local index1 = row * pointsPerRow + column + 1
                     local index2 = (row + 1) * pointsPerRow + column + 1
-                    local uiX1, uiY1 = globalToUi(_destinationPoints[index1].x, _destinationPoints[index1].y)
-                    local uiX2, uiY2 = globalToUi(_destinationPoints[index2].x, _destinationPoints[index2].y)
+                    local uiX1, uiY1 = globalToUi(destinationPoints[index1].x, destinationPoints[index1].y)
+                    local uiX2, uiY2 = globalToUi(destinationPoints[index2].x, destinationPoints[index2].y)
                     graphicsContext:beginPath()
                     graphicsContext:moveTo(uiX1, uiY1)
                     graphicsContext:lineTo(uiX2, uiY2)
@@ -620,9 +615,9 @@ local function initializeMeshWarpTool()
                 end
             end
 
-            for index, point in ipairs(_destinationPoints) do
+            for index, point in ipairs(destinationPoints) do
                 local uiX, uiY = globalToUi(point.x, point.y)
-                local fillColor = (index == _activePointIndex) and Color{r=255, g=50, b=50} or Color{r=50, g=150, b=255}
+                local fillColor = (index == activePointIndex) and Color{r=255, g=50, b=50} or Color{r=50, g=150, b=255}
                 local strokeColor = Color{r=255, g=255, b=255}
                 
                 drawInteractiveHandle(graphicsContext, uiX - HandleRadius, uiY - HandleRadius, HandleRadius * 2, fillColor, strokeColor)
@@ -636,19 +631,19 @@ local function initializeMeshWarpTool()
             local centerX = CanvasSize / 2
             local centerY = CanvasSize / 2
             
-            local oldBaseUiX = (mouseX - centerX) / _cameraZoom + centerX - _cameraPanX
-            local oldBaseUiY = (mouseY - centerY) / _cameraZoom + centerY - _cameraPanY
+            local oldBaseUiX = (mouseX - centerX) / cameraZoom + centerX - cameraPanX
+            local oldBaseUiY = (mouseY - centerY) / cameraZoom + centerY - cameraPanY
             
             if event.deltaY > 0 then
-                _cameraZoom = _cameraZoom / 1.15
+                cameraZoom = cameraZoom / 1.15
             elseif event.deltaY < 0 then
-                _cameraZoom = _cameraZoom * 1.15
+                cameraZoom = cameraZoom * 1.15
             end
             
-            _cameraZoom = math.max(0.1, math.min(_cameraZoom, 15.0))
+            cameraZoom = math.max(0.1, math.min(cameraZoom, 15.0))
             
-            _cameraPanX = (mouseX - centerX) / _cameraZoom + centerX - oldBaseUiX
-            _cameraPanY = (mouseY - centerY) / _cameraZoom + centerY - oldBaseUiY
+            cameraPanX = (mouseX - centerX) / cameraZoom + centerX - oldBaseUiX
+            cameraPanY = (mouseY - centerY) / cameraZoom + centerY - oldBaseUiY
             
             dialog:repaint()
         end,
@@ -656,52 +651,52 @@ local function initializeMeshWarpTool()
             local mouseX, mouseY = event.x, event.y
             
             if event.button == MouseButton.MIDDLE or event.button == MouseButton.RIGHT then
-                _isPanning = true
-                _lastMouseX = mouseX
-                _lastMouseY = mouseY
+                isPanning = true
+                lastMouseX = mouseX
+                lastMouseY = mouseY
                 return
             end
 
-            for index, point in ipairs(_destinationPoints) do
+            for index, point in ipairs(destinationPoints) do
                 local uiX, uiY = globalToUi(point.x, point.y)
                 local distance = math.sqrt((mouseX - uiX)^2 + (mouseY - uiY)^2)
                 
                 if distance <= HandleRadius * 2.5 then
-                    _activePointIndex = index
-                    _isDragging = true
+                    activePointIndex = index
+                    isDragging = true
                     dialog:repaint()
                     break
                 end
             end
             
-            if not _isDragging then
-                _isPanning = true
-                _lastMouseX = mouseX
-                _lastMouseY = mouseY
+            if not isDragging then
+                isPanning = true
+                lastMouseX = mouseX
+                lastMouseY = mouseY
             end
         end,
         onmousemove = function(event)
-            if _isPanning then
-                local deltaX = event.x - _lastMouseX
-                local deltaY = event.y - _lastMouseY
-                _cameraPanX = _cameraPanX + deltaX / _cameraZoom
-                _cameraPanY = _cameraPanY + deltaY / _cameraZoom
-                _lastMouseX = event.x
-                _lastMouseY = event.y
+            if isPanning then
+                local deltaX = event.x - lastMouseX
+                local deltaY = event.y - lastMouseY
+                cameraPanX = cameraPanX + deltaX / cameraZoom
+                cameraPanY = cameraPanY + deltaY / cameraZoom
+                lastMouseX = event.x
+                lastMouseY = event.y
                 dialog:repaint()
-            elseif _isDragging and _activePointIndex > 0 then
+            elseif isDragging and activePointIndex > 0 then
                 local globalX, globalY = uiToGlobal(event.x, event.y)
-                _destinationPoints[_activePointIndex].x = globalX
-                _destinationPoints[_activePointIndex].y = globalY
+                destinationPoints[activePointIndex].x = globalX
+                destinationPoints[activePointIndex].y = globalY
                 
-                _needsUpdate = true
+                needsUpdate = true
                 dialog:repaint()
             end
         end,
         onmouseup = function(event)
-            _isDragging = false
-            _isPanning = false
-            _activePointIndex = 0
+            isDragging = false
+            isPanning = false
+            activePointIndex = 0
             dialog:repaint()
         end
     }
@@ -711,7 +706,7 @@ local function initializeMeshWarpTool()
         text = "Show Full Canvas Context",
         selected = true,
         onclick = function()
-            _showContext = dialog.data.showContext
+            showContext = dialog.data.showContext
             updateViewMetrics()
             dialog:repaint()
         end
@@ -724,7 +719,7 @@ local function initializeMeshWarpTool()
         text = "Apply Mesh Warp",
         onclick = function()
             app.transaction(function()
-                local finalImage, offset = renderDistortedImage(sourceImage, _destinationPoints, _currentGridResolution, 255, _samplingMode, 1.0)
+                local finalImage, offset = renderDistortedImage(sourceImage, destinationPoints, currentGridResolution, 255, samplingMode, 1.0)
                 if not finalImage then return end
 
                 local newCelImage = cel.image:clone()
