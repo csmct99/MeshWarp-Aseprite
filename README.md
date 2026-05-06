@@ -7,6 +7,8 @@ Whether you need to map a flat texture onto an isometric wall, create a wavy fla
 I felt like aseprite was missing this feature I love in PS and Gimp so I made a script which does it.
 Its not perfect by any means but it gets the job done. Im open to suggestions though.
 
+https://github.com/user-attachments/assets/db115891-29d3-4bc0-888a-1dea28deafce
+
 ## Features:
 - **Adjustable Grid Resolution**: Start with a simple 1x1 perspective plane, or increase the mesh up to a 6x6 grid for complex, curved surface deformations
 - **Interactive UI Viewport**: Pan (Middle/Right Click), zoom (Scroll Wheel), and drag handles precisely inside a custom popup window without destroying the original canvas
@@ -19,6 +21,7 @@ Its not perfect by any means but it gets the job done. Im open to suggestions th
 - **Non-Destructive Integration**: Safely applies to your active cel with full Aseprite undo (Ctrl+Z) support
 - **Layer Support**: Respects the layers you have already configured and applies only to the selected layer
 
+https://github.com/user-attachments/assets/3af21896-b845-490e-90eb-1cf272370eee
 
 ## Installation:
 1. Download the MeshWarp.lua file from this repository
@@ -27,7 +30,6 @@ Its not perfect by any means but it gets the job done. Im open to suggestions th
 4. Move MeshWarp.lua into the folder that opens up in step 3
 5. Back in Aseprite, go to File -> Scripts -> Rescan Scripts (or simply restart Aseprite).
 6. You can now use the tool by going to File -> Scripts -> MeshWarp
-
 
 ## How to Use:
 1. Select your art: Use the Marquee tool to select the specific part of your sprite you want to warp. (Note: If you don't select anything, the tool will grab the bounds of your entire active cel)
