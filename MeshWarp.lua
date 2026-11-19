@@ -177,16 +177,20 @@ end
 -- Samples a sub-pixel fractional coordinate using a 4-point bilinear interpolation blend.
 -- Utilizes pre-multiplied alpha weighting to prevent dark fringing on transparent edges.
 local function getBilinearSampledColor(image, sourceX, sourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
-    sourceX = sourceX - 0.5
-    sourceY = sourceY - 0.5
+    -- Source coordinates are continuous (pixel i spans [i, i + 1) and is centered at i + 0.5),
+    -- so shift to neighbor-index space before selecting the four taps.
+    local adjustedX = sourceX - 0.5
+    local adjustedY = sourceY - 0.5
     
-    local leftX = math.floor(sourceX)
-    local topY = math.floor(sourceY)
-    local rightX = leftX + 1
-    local bottomY = topY + 1
+    -- Clamp the taps to the image instead of letting out-of-bounds neighbors read as transparent.
+    -- This keeps edge pixels fully opaque and makes sampling a no-op warp an exact identity.
+    local leftX = math.max(0, math.floor(adjustedX))
+    local topY = math.max(0, math.floor(adjustedY))
+    local rightX = math.min(image.width - 1, leftX + 1)
+    local bottomY = math.min(image.height - 1, topY + 1)
     
-    local fractionX = sourceX - leftX
-    local fractionY = sourceY - topY
+    local fractionX = math.max(0, math.min(1, adjustedX - leftX))
+    local fractionY = math.max(0, math.min(1, adjustedY - topY))
     
     local redTopLeft, greenTopLeft, blueTopLeft, alphaTopLeft = extractPixelRgba(image, leftX, topY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
     local redTopRight, greenTopRight, blueTopRight, alphaTopRight = extractPixelRgba(image, rightX, topY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
@@ -226,15 +230,18 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
         maximumY = math.max(maximumY, destinationPoints[i].y)
     end
     
-    local outputWidth = math.max(1, math.ceil((maximumX - minimumX) * renderScale))
-    local outputHeight = math.max(1, math.ceil((maximumY - minimumY) * renderScale))
+    -- Align the output pixel grid to the canvas pixel grid. Without this, a fractional
+    -- bounding box would place the result at a fractional offset, and Apply would truncate
+    -- that offset to an integer cel position, shifting the warp by a sub-pixel amount.
+    local originX = math.floor(minimumX)
+    local originY = math.floor(minimumY)
+    
+    local outputWidth = math.max(1, math.ceil((maximumX - originX) * renderScale))
+    local outputHeight = math.max(1, math.ceil((maximumY - originY) * renderScale))
     
     local isPreview = (previewAlpha ~= nil) and (previewAlpha < 255)
     local useRgbMode = isPreview or (samplingMode == "Bilinear")
     local outputImage = Image(outputWidth, outputHeight, useRgbMode and ColorMode.RGB or sourceImage.colorMode)
-    
-    local sourceMaxWidth = sourceImage.width - 1
-    local sourceMaxHeight = sourceImage.height - 1
     
     local pixelColorTools = app.pixelColor
     local isIndexed = sourceImage.colorMode == ColorMode.INDEXED
@@ -244,10 +251,12 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
     
     for y = 0, outputHeight - 1 do
         for x = 0, outputWidth - 1 do
-            local worldX = minimumX + (x + 0.5) / renderScale
-            local worldY = minimumY + (y + 0.5) / renderScale
+            local worldX = originX + (x + 0.5) / renderScale
+            local worldY = originY + (y + 0.5) / renderScale
             
-            local sampleX, sampleY = findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceMaxWidth, sourceMaxHeight)
+            -- The source map uses continuous coordinates, so the full image extent is passed.
+            -- Using width - 1 would compress every cell by one pixel.
+            local sampleX, sampleY = findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceImage.width, sourceImage.height)
             
             if sampleX and sampleY then
                 if samplingMode == "Bilinear" then
@@ -263,26 +272,25 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
                     outputImage:drawPixel(x, y, sampledColor)
                     
                 else
-                    local roundedSourceX = math.floor(sampleX + 0.5)
-                    local roundedSourceY = math.floor(sampleY + 0.5)
+                    -- Continuous coordinate -> containing pixel index, clamped to the image.
+                    local nearestSourceX = math.max(0, math.min(sourceImage.width - 1, math.floor(sampleX)))
+                    local nearestSourceY = math.max(0, math.min(sourceImage.height - 1, math.floor(sampleY)))
                     
-                    if roundedSourceX >= 0 and roundedSourceX < sourceImage.width and roundedSourceY >= 0 and roundedSourceY < sourceImage.height then
-                        local rawColor = sourceImage:getPixel(roundedSourceX, roundedSourceY)
-                        
-                        if isPreview then
-                            local extractedRed, extractedGreen, extractedBlue, extractedAlpha = extractPixelRgba(sourceImage, roundedSourceX, roundedSourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
-                            extractedAlpha = math.floor(extractedAlpha * (previewAlpha / 255.0))
-                            rawColor = pixelColorTools.rgba(extractedRed, extractedGreen, extractedBlue, extractedAlpha)
-                        end
-                        
-                        outputImage:drawPixel(x, y, rawColor)
+                    local rawColor = sourceImage:getPixel(nearestSourceX, nearestSourceY)
+                    
+                    if isPreview then
+                        local extractedRed, extractedGreen, extractedBlue, extractedAlpha = extractPixelRgba(sourceImage, nearestSourceX, nearestSourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
+                        extractedAlpha = math.floor(extractedAlpha * (previewAlpha / 255.0))
+                        rawColor = pixelColorTools.rgba(extractedRed, extractedGreen, extractedBlue, extractedAlpha)
                     end
+                    
+                    outputImage:drawPixel(x, y, rawColor)
                 end
             end
         end
     end
     
-    return outputImage, Point(minimumX, minimumY)
+    return outputImage, Point(originX, originY)
 end
 
 -- Helper utility to draw primitive rectangles representing interaction handles.
