@@ -508,6 +508,10 @@ local function initializeMeshWarpTool()
     local activePointIndex = 0
     local isDragging = false
     local needsUpdate = true
+    -- While a handle is held, renders are driven by this timer instead of one render per
+    -- mouse-move event. nil when the running Aseprite build has no Timer class.
+    local dragRenderTimer = nil
+    local isDialogOpen = true
     local previewImage = nil
     local previewOffset = Point(0,0)
     -- Size the preview occupies on the canvas grid (i.e. its size at 100% preview resolution).
@@ -598,6 +602,33 @@ local function initializeMeshWarpTool()
 
     updateViewMetrics()
     local dialog = Dialog("Mesh Warp Tool")
+
+    -- dialog:repaint() invokes the canvas onpaint callback synchronously, so repainting on
+    -- every mouse-move event ties the render rate to the input device (potentially hundreds
+    -- of renders per second). While dragging, render from this 30 Hz pump instead: events
+    -- only update the mesh, intermediate positions are coalesced, and the latest state is
+    -- always what gets drawn. Other interactions keep repainting immediately.
+    if Timer then
+        dragRenderTimer = Timer {
+            interval = 1 / 30,
+            ontick = function()
+                if not isDialogOpen then
+                    dragRenderTimer:stop()
+                    return
+                end
+                if not needsUpdate then
+                    return
+                end
+                -- onpaint clears needsUpdate, so an idle drag does no work.
+                local ok, err = pcall(dialog.repaint, dialog)
+                if not ok then
+                    -- The dialog was closed externally; stop the pump.
+                    dragRenderTimer:stop()
+                    if err then print(err) end
+                end
+            end
+        }
+    end
 
     dialog:slider {
         id = "gridResolution",
@@ -781,6 +812,7 @@ local function initializeMeshWarpTool()
                 if distance <= HandleRadius * 2.5 then
                     activePointIndex = index
                     isDragging = true
+                    if dragRenderTimer then dragRenderTimer:start() end
                     dialog:repaint()
                     break
                 end
@@ -807,13 +839,19 @@ local function initializeMeshWarpTool()
                 destinationPoints[activePointIndex].y = globalY
                 
                 needsUpdate = true
-                dialog:repaint()
+                if not dragRenderTimer then
+                    -- Older Aseprite without Timer: keep the original per-event repaint.
+                    dialog:repaint()
+                end
             end
         end,
         onmouseup = function(event)
             isDragging = false
             isPanning = false
             activePointIndex = 0
+            if dragRenderTimer then dragRenderTimer:stop() end
+            -- Guarantee one final frame with the released handle position.
+            needsUpdate = true
             dialog:repaint()
         end
     }
@@ -859,6 +897,8 @@ local function initializeMeshWarpTool()
                 cel.image = compositeImage
                 cel.position = Point(minX, minY)
             end)
+            isDialogOpen = false
+            if dragRenderTimer then dragRenderTimer:stop() end
             dialog:close()
         end
     }
@@ -866,7 +906,11 @@ local function initializeMeshWarpTool()
     dialog:button {
         id = "cancel",
         text = "Cancel",
-        onclick = function() dialog:close() end
+        onclick = function()
+            isDialogOpen = false
+            if dragRenderTimer then dragRenderTimer:stop() end
+            dialog:close()
+        end
     }
 
     dialog:show { wait = false }
