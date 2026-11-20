@@ -69,41 +69,79 @@ local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, 
     return nil, nil
 end
 
--- Maps an output pixel to a specific source coordinate within an arbitrary N x N grid structure.
--- Employs AABB boundary culling to ensure high grid resolutions remain performant.
-local function findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceWidth, sourceHeight)
+-- Precomputes per-cell geometry once per render: the four corners, the axis-aligned
+-- bounds used for culling, and the source-space offset of the cell. The bounds are
+-- invariant for a whole frame, so recomputing them per output pixel (as the renderer
+-- used to) is wasted work.
+local function buildGridCells(destinationPoints, gridResolution, sourceWidth, sourceHeight)
     local quadWidth = sourceWidth / gridResolution
     local quadHeight = sourceHeight / gridResolution
     local pointsPerRow = gridResolution + 1
-    
+    local cells = {}
+
     for row = 0, gridResolution - 1 do
         for column = 0, gridResolution - 1 do
             local index1 = row * pointsPerRow + column + 1
             local index2 = index1 + 1
             local index4 = (row + 1) * pointsPerRow + column + 1
             local index3 = index4 + 1
-            
+
             local point1 = destinationPoints[index1]
             local point2 = destinationPoints[index2]
             local point3 = destinationPoints[index3]
             local point4 = destinationPoints[index4]
-            
-            -- Fast Axis-Aligned Bounding Box (AABB) culling. 
-            -- Avoids running the heavy inverse bilinear math if the pixel is completely outside this specific grid cell.
-            local minimumX = math.min(point1.x, point2.x, point3.x, point4.x)
-            local maximumX = math.max(point1.x, point2.x, point3.x, point4.x)
-            local minimumY = math.min(point1.y, point2.y, point3.y, point4.y)
-            local maximumY = math.max(point1.y, point2.y, point3.y, point4.y)
-            
-            if worldX >= minimumX - 0.01 and worldX <= maximumX + 0.01 and worldY >= minimumY - 0.01 and worldY <= maximumY + 0.01 then
-                local normalizedX, normalizedY = calculateInverseBilinear(worldX, worldY, point1, point2, point3, point4)
-                if normalizedX and normalizedY then
-                    return column * quadWidth + normalizedX * quadWidth, row * quadHeight + normalizedY * quadHeight
-                end
+
+            -- Plain comparisons instead of math.min/max: this runs once per cell, and the
+            -- vararg math functions are relatively expensive interpreter-to-C calls.
+            local minimumX, maximumX = point1.x, point1.x
+            if point2.x < minimumX then minimumX = point2.x elseif point2.x > maximumX then maximumX = point2.x end
+            if point3.x < minimumX then minimumX = point3.x elseif point3.x > maximumX then maximumX = point3.x end
+            if point4.x < minimumX then minimumX = point4.x elseif point4.x > maximumX then maximumX = point4.x end
+
+            local minimumY, maximumY = point1.y, point1.y
+            if point2.y < minimumY then minimumY = point2.y elseif point2.y > maximumY then maximumY = point2.y end
+            if point3.y < minimumY then minimumY = point3.y elseif point3.y > maximumY then maximumY = point3.y end
+            if point4.y < minimumY then minimumY = point4.y elseif point4.y > maximumY then maximumY = point4.y end
+
+            cells[#cells + 1] = {
+                point1 = point1,
+                point2 = point2,
+                point3 = point3,
+                point4 = point4,
+                minimumX = minimumX,
+                maximumX = maximumX,
+                minimumY = minimumY,
+                maximumY = maximumY,
+                sourceX = column * quadWidth,
+                sourceY = row * quadHeight,
+                quadWidth = quadWidth,
+                quadHeight = quadHeight,
+            }
+        end
+    end
+
+    return cells
+end
+
+-- Maps an output pixel to a specific source coordinate within an arbitrary N x N grid structure.
+-- Employs AABB boundary culling (precomputed per cell) to ensure high grid resolutions remain performant.
+local function findSourceCoordinate(worldX, worldY, cells)
+    for cellIndex = 1, #cells do
+        local cell = cells[cellIndex]
+
+        -- Fast Axis-Aligned Bounding Box (AABB) culling.
+        -- Avoids running the heavy inverse bilinear math if the pixel is completely outside this specific grid cell.
+        if worldX >= cell.minimumX - 0.01 and worldX <= cell.maximumX + 0.01 and
+           worldY >= cell.minimumY - 0.01 and worldY <= cell.maximumY + 0.01 then
+            local normalizedX, normalizedY = calculateInverseBilinear(
+                worldX, worldY, cell.point1, cell.point2, cell.point3, cell.point4)
+            if normalizedX and normalizedY then
+                return cell.sourceX + normalizedX * cell.quadWidth,
+                       cell.sourceY + normalizedY * cell.quadHeight
             end
         end
     end
-    
+
     return nil, nil
 end
 
@@ -177,16 +215,20 @@ end
 -- Samples a sub-pixel fractional coordinate using a 4-point bilinear interpolation blend.
 -- Utilizes pre-multiplied alpha weighting to prevent dark fringing on transparent edges.
 local function getBilinearSampledColor(image, sourceX, sourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
-    sourceX = sourceX - 0.5
-    sourceY = sourceY - 0.5
+    -- Source coordinates are continuous (pixel i spans [i, i + 1) and is centered at i + 0.5),
+    -- so shift to neighbor-index space before selecting the four taps.
+    local adjustedX = sourceX - 0.5
+    local adjustedY = sourceY - 0.5
     
-    local leftX = math.floor(sourceX)
-    local topY = math.floor(sourceY)
-    local rightX = leftX + 1
-    local bottomY = topY + 1
+    -- Clamp the taps to the image instead of letting out-of-bounds neighbors read as transparent.
+    -- This keeps edge pixels fully opaque and makes sampling a no-op warp an exact identity.
+    local leftX = math.max(0, math.floor(adjustedX))
+    local topY = math.max(0, math.floor(adjustedY))
+    local rightX = math.min(image.width - 1, leftX + 1)
+    local bottomY = math.min(image.height - 1, topY + 1)
     
-    local fractionX = sourceX - leftX
-    local fractionY = sourceY - topY
+    local fractionX = math.max(0, math.min(1, adjustedX - leftX))
+    local fractionY = math.max(0, math.min(1, adjustedY - topY))
     
     local redTopLeft, greenTopLeft, blueTopLeft, alphaTopLeft = extractPixelRgba(image, leftX, topY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
     local redTopRight, greenTopRight, blueTopRight, alphaTopRight = extractPixelRgba(image, rightX, topY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
@@ -226,28 +268,44 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
         maximumY = math.max(maximumY, destinationPoints[i].y)
     end
     
-    local outputWidth = math.max(1, math.ceil((maximumX - minimumX) * renderScale))
-    local outputHeight = math.max(1, math.ceil((maximumY - minimumY) * renderScale))
-    
+    -- Align the output pixel grid to the canvas pixel grid. Without this, a fractional
+    -- bounding box would place the result at a fractional offset, and Apply would truncate
+    -- that offset to an integer cel position, shifting the warp by a sub-pixel amount.
+    local originX = math.floor(minimumX)
+    local originY = math.floor(minimumY)
+
+    -- Extent this render covers at 100% preview resolution.
+    local nativeWidth = math.max(1, math.ceil(maximumX - originX))
+    local nativeHeight = math.max(1, math.ceil(maximumY - originY))
+
+    local outputWidth = math.max(1, math.ceil(nativeWidth * renderScale))
+    local outputHeight = math.max(1, math.ceil(nativeHeight * renderScale))
+
+    -- Sample on a grid that spans exactly the native extent, so a reduced-resolution render
+    -- is a coarser view of the same area (and never overshoots it).
+    local worldStepX = nativeWidth / outputWidth
+    local worldStepY = nativeHeight / outputHeight
+
     local isPreview = (previewAlpha ~= nil) and (previewAlpha < 255)
     local useRgbMode = isPreview or (samplingMode == "Bilinear")
     local outputImage = Image(outputWidth, outputHeight, useRgbMode and ColorMode.RGB or sourceImage.colorMode)
-    
-    local sourceMaxWidth = sourceImage.width - 1
-    local sourceMaxHeight = sourceImage.height - 1
     
     local pixelColorTools = app.pixelColor
     local isIndexed = sourceImage.colorMode == ColorMode.INDEXED
     local isGrayscale = sourceImage.colorMode == ColorMode.GRAY
     local palette = isIndexed and app.activeSprite.palettes[1] or nil
     local transparentIndex = isIndexed and app.activeSprite.transparentColor or -1
-    
+
+    -- Destinations and their AABBs are constant for the whole frame: build them once here
+    -- instead of recomputing per output pixel.
+    local gridCells = buildGridCells(destinationPoints, gridResolution, sourceImage.width, sourceImage.height)
+
     for y = 0, outputHeight - 1 do
         for x = 0, outputWidth - 1 do
-            local worldX = minimumX + (x + 0.5) / renderScale
-            local worldY = minimumY + (y + 0.5) / renderScale
-            
-            local sampleX, sampleY = findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceMaxWidth, sourceMaxHeight)
+            local worldX = originX + (x + 0.5) * worldStepX
+            local worldY = originY + (y + 0.5) * worldStepY
+
+            local sampleX, sampleY = findSourceCoordinate(worldX, worldY, gridCells)
             
             if sampleX and sampleY then
                 if samplingMode == "Bilinear" then
@@ -263,26 +321,54 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
                     outputImage:drawPixel(x, y, sampledColor)
                     
                 else
-                    local roundedSourceX = math.floor(sampleX + 0.5)
-                    local roundedSourceY = math.floor(sampleY + 0.5)
+                    -- Continuous coordinate -> containing pixel index, clamped to the image.
+                    local nearestSourceX = math.max(0, math.min(sourceImage.width - 1, math.floor(sampleX)))
+                    local nearestSourceY = math.max(0, math.min(sourceImage.height - 1, math.floor(sampleY)))
                     
-                    if roundedSourceX >= 0 and roundedSourceX < sourceImage.width and roundedSourceY >= 0 and roundedSourceY < sourceImage.height then
-                        local rawColor = sourceImage:getPixel(roundedSourceX, roundedSourceY)
-                        
-                        if isPreview then
-                            local extractedRed, extractedGreen, extractedBlue, extractedAlpha = extractPixelRgba(sourceImage, roundedSourceX, roundedSourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
-                            extractedAlpha = math.floor(extractedAlpha * (previewAlpha / 255.0))
-                            rawColor = pixelColorTools.rgba(extractedRed, extractedGreen, extractedBlue, extractedAlpha)
-                        end
-                        
-                        outputImage:drawPixel(x, y, rawColor)
+                    local rawColor = sourceImage:getPixel(nearestSourceX, nearestSourceY)
+                    
+                    if isPreview then
+                        local extractedRed, extractedGreen, extractedBlue, extractedAlpha = extractPixelRgba(sourceImage, nearestSourceX, nearestSourceY, isIndexed, palette, transparentIndex, isGrayscale, pixelColorTools)
+                        extractedAlpha = math.floor(extractedAlpha * (previewAlpha / 255.0))
+                        rawColor = pixelColorTools.rgba(extractedRed, extractedGreen, extractedBlue, extractedAlpha)
                     end
+                    
+                    outputImage:drawPixel(x, y, rawColor)
                 end
             end
         end
     end
     
-    return outputImage, Point(minimumX, minimumY)
+    -- The native extent is the size this render would have at 100% preview resolution. The
+    -- caller needs it to place a reduced-resolution preview on the canvas pixel grid.
+    return outputImage, Point(originX, originY), nativeWidth, nativeHeight
+end
+
+-- Nearest-neighbor scale used to expand a reduced-resolution preview back to the native
+-- canvas pixel grid before it is baked into the composite. Without this step a "Preview
+-- Res %" below 100 would shrink the preview instead of making it coarser.
+local function upscaleImageNearest(sourceImage, targetWidth, targetHeight)
+    targetWidth = math.max(1, targetWidth)
+    targetHeight = math.max(1, targetHeight)
+
+    if sourceImage.width == targetWidth and sourceImage.height == targetHeight then
+        return sourceImage
+    end
+
+    local scaledImage = Image(targetWidth, targetHeight, sourceImage.colorMode)
+    local sourcePerTargetX = sourceImage.width / targetWidth
+    local sourcePerTargetY = sourceImage.height / targetHeight
+
+    for y = 0, targetHeight - 1 do
+        -- Sample at target pixel centers so the upscaled blocks stay aligned to the grid.
+        local sourceY = math.min(sourceImage.height - 1, math.floor((y + 0.5) * sourcePerTargetY))
+        for x = 0, targetWidth - 1 do
+            local sourceX = math.min(sourceImage.width - 1, math.floor((x + 0.5) * sourcePerTargetX))
+            scaledImage:drawPixel(x, y, sourceImage:getPixel(sourceX, sourceY))
+        end
+    end
+
+    return scaledImage
 end
 
 -- Helper utility to draw primitive rectangles representing interaction handles.
@@ -353,6 +439,29 @@ local function clearSelectedPixels(targetImage, sprite, selection, bounds, celPo
     end
 end
 
+-- Color that keeps uncovered pixels transparent in the sprite's color mode.
+local function transparentBackgroundColor(sprite)
+    if sprite.colorMode == ColorMode.INDEXED then
+        return Color{ index = sprite.transparentColor }
+    end
+    return Color{ r = 0, g = 0, b = 0, a = 0 }
+end
+
+-- Bounds (in canvas pixels) of the native-resolution image that holds the background art
+-- and the warped preview. Kept integral so the two share one pixel grid.
+local function calculateCompositeBounds(spriteWidth, spriteHeight, previewOffset, previewWidth, previewHeight, includeContext)
+    if includeContext then
+        return math.min(0, previewOffset.x),
+               math.min(0, previewOffset.y),
+               math.max(spriteWidth, previewOffset.x + previewWidth),
+               math.max(spriteHeight, previewOffset.y + previewHeight)
+    end
+    return previewOffset.x,
+           previewOffset.y,
+           previewOffset.x + previewWidth,
+           previewOffset.y + previewHeight
+end
+
 -- The main entry point for the extension.
 local function initializeMeshWarpTool()
     local sprite = app.activeSprite
@@ -399,12 +508,21 @@ local function initializeMeshWarpTool()
     local activePointIndex = 0
     local isDragging = false
     local needsUpdate = true
+    -- While a handle is held, renders are driven by this timer instead of one render per
+    -- mouse-move event. nil when the running Aseprite build has no Timer class.
+    local dragRenderTimer = nil
+    local isDialogOpen = true
     local previewImage = nil
     local previewOffset = Point(0,0)
+    -- Size the preview occupies on the canvas grid (i.e. its size at 100% preview resolution).
+    local previewNativeWidth = 1
+    local previewNativeHeight = 1
 
     local rawContextImage = nil
-    local scaledContextImage = nil
-    local lastContextScale = 0
+    -- The preview is baked into the background art at native resolution, so both are
+    -- rasterized as one bitmap and therefore share the same pixel grid on screen.
+    local compositeImage = nil
+    local compositeOffset = Point(0, 0)
 
     app.transaction("Temp Capture Context", function()
         local tempCelImage = cel.image:clone()
@@ -453,28 +571,64 @@ local function initializeMeshWarpTool()
         return globalX, globalY
     end
 
-    local function getScaledContext()
-        if not scaledContextImage or lastContextScale ~= viewScale then
-            local scaledWidth = math.max(1, math.floor(sprite.width * viewScale))
-            local scaledHeight = math.max(1, math.floor(sprite.height * viewScale))
-            scaledContextImage = Image(scaledWidth, scaledHeight, sprite.colorMode)
-            
-            for y = 0, scaledHeight - 1 do
-                for x = 0, scaledWidth - 1 do
-                    local sourceX = math.floor(x / viewScale)
-                    local sourceY = math.floor(y / viewScale)
-                    if sourceX >= 0 and sourceX < sprite.width and sourceY >= 0 and sourceY < sprite.height then
-                        scaledContextImage:drawPixel(x, y, rawContextImage:getPixel(sourceX, sourceY))
-                    end
-                end
-            end
-            lastContextScale = viewScale
+    -- Bakes the warped preview into the background art at native (canvas-pixel) resolution.
+    -- Both are canvas-aligned with integer offsets, so this copy is 1:1 and exact; the
+    -- result is drawn to the dialog in a single blit, which keeps the warp and the art on
+    -- the same pixel grid regardless of view scale, camera zoom or integer rounding.
+    local function rebuildComposite()
+        -- Expand the (possibly reduced-resolution) preview onto the native canvas grid so
+        -- it occupies exactly the same world extent at any "Preview Res %" setting.
+        local nativePreview = upscaleImageNearest(previewImage, previewNativeWidth, previewNativeHeight)
+
+        local compositeMinX, compositeMinY, compositeMaxX, compositeMaxY = calculateCompositeBounds(
+            sprite.width, sprite.height, previewOffset,
+            nativePreview.width, nativePreview.height, showContext)
+
+        compositeOffset = Point(compositeMinX, compositeMinY)
+        -- Match the preview's color mode so a semi-transparent or bilinear preview is not
+        -- quantized into the sprite palette before it is displayed.
+        compositeImage = Image(compositeMaxX - compositeMinX,
+                               compositeMaxY - compositeMinY,
+                               nativePreview.colorMode)
+        compositeImage:clear(compositeImage.bounds, transparentBackgroundColor(sprite))
+
+        if showContext then
+            compositeImage:drawImage(rawContextImage, Point(-compositeMinX, -compositeMinY))
         end
-        return scaledContextImage
+        -- Preview alpha (opacity) is already baked into the preview, so blend at 255.
+        compositeImage:drawImage(nativePreview, Point(previewOffset.x - compositeMinX,
+                                                      previewOffset.y - compositeMinY))
     end
 
     updateViewMetrics()
     local dialog = Dialog("Mesh Warp Tool")
+
+    -- dialog:repaint() invokes the canvas onpaint callback synchronously, so repainting on
+    -- every mouse-move event ties the render rate to the input device (potentially hundreds
+    -- of renders per second). While dragging, render from this 30 Hz pump instead: events
+    -- only update the mesh, intermediate positions are coalesced, and the latest state is
+    -- always what gets drawn. Other interactions keep repainting immediately.
+    if Timer then
+        dragRenderTimer = Timer {
+            interval = 1 / 30,
+            ontick = function()
+                if not isDialogOpen then
+                    dragRenderTimer:stop()
+                    return
+                end
+                if not needsUpdate then
+                    return
+                end
+                -- onpaint clears needsUpdate, so an idle drag does no work.
+                local ok, err = pcall(dialog.repaint, dialog)
+                if not ok then
+                    -- The dialog was closed externally; stop the pump.
+                    dragRenderTimer:stop()
+                    if err then print(err) end
+                end
+            end
+        }
+    end
 
     dialog:slider {
         id = "gridResolution",
@@ -546,43 +700,37 @@ local function initializeMeshWarpTool()
             local backgroundHeight = backgroundBottom - backgroundY
 
             drawTransparencyCheckerboard(graphicsContext, backgroundX, backgroundY, backgroundWidth, backgroundHeight, 10 * cameraZoom)
-            if showContext then
-                local contextImage = getScaledContext()
-                graphicsContext:drawImage(
-                    contextImage, 
-                    Rectangle(0, 0, contextImage.width, contextImage.height),
-                    Rectangle(math.floor(backgroundX), math.floor(backgroundY), math.floor(backgroundWidth), math.floor(backgroundHeight))
-                )
-            end
 
             local currentAlpha = (dialog.data and dialog.data.previewOpacity) or 255
             local currentScale = (dialog.data and dialog.data.previewScale) or 100
             local renderScale = currentScale / 100.0
 
             if needsUpdate then
-                previewImage, previewOffset = renderDistortedImage(sourceImage, destinationPoints, currentGridResolution, currentAlpha, samplingMode, renderScale)
+                previewImage, previewOffset, previewNativeWidth, previewNativeHeight =
+                    renderDistortedImage(sourceImage, destinationPoints, currentGridResolution, currentAlpha, samplingMode, renderScale)
+                rebuildComposite()
                 needsUpdate = false
             end
 
-            if previewImage then
-                local drawScale = 1.0 / renderScale
-                local mathGlobalX = previewOffset.x
-                local mathGlobalY = previewOffset.y
-                local mathGlobalWidth = previewImage.width * drawScale
-                local mathGlobalHeight = previewImage.height * drawScale
-                
-                local previewUiX, previewUiY = globalToUi(mathGlobalX, mathGlobalY)
-                local previewUiRight, previewUiBottom = globalToUi(mathGlobalX + mathGlobalWidth, mathGlobalY + mathGlobalHeight)
-                
-                local drawX = math.floor(previewUiX)
-                local drawY = math.floor(previewUiY)
-                local drawWidth = math.max(1, math.floor(previewUiRight - previewUiX + 0.5))
-                local drawHeight = math.max(1, math.floor(previewUiBottom - previewUiY + 0.5))
-                
+            if compositeImage then
+                local compositeUiX, compositeUiY = globalToUi(compositeOffset.x, compositeOffset.y)
+                local compositeUiRight, compositeUiBottom = globalToUi(
+                    compositeOffset.x + compositeImage.width,
+                    compositeOffset.y + compositeImage.height)
+
+                -- Round both edges from the same transform so the single bitmap lands as
+                -- close to the canvas grid as an integer blit allows.
+                local drawX = math.floor(compositeUiX + 0.5)
+                local drawY = math.floor(compositeUiY + 0.5)
+                local drawRight = math.floor(compositeUiRight + 0.5)
+                local drawBottom = math.floor(compositeUiBottom + 0.5)
+
                 graphicsContext:drawImage(
-                    previewImage, 
-                    Rectangle(0, 0, previewImage.width, previewImage.height), 
-                    Rectangle(drawX, drawY, drawWidth, drawHeight)
+                    compositeImage,
+                    Rectangle(0, 0, compositeImage.width, compositeImage.height),
+                    Rectangle(drawX, drawY,
+                              math.max(1, drawRight - drawX),
+                              math.max(1, drawBottom - drawY))
                 )
             end
 
@@ -664,6 +812,7 @@ local function initializeMeshWarpTool()
                 if distance <= HandleRadius * 2.5 then
                     activePointIndex = index
                     isDragging = true
+                    if dragRenderTimer then dragRenderTimer:start() end
                     dialog:repaint()
                     break
                 end
@@ -690,13 +839,19 @@ local function initializeMeshWarpTool()
                 destinationPoints[activePointIndex].y = globalY
                 
                 needsUpdate = true
-                dialog:repaint()
+                if not dragRenderTimer then
+                    -- Older Aseprite without Timer: keep the original per-event repaint.
+                    dialog:repaint()
+                end
             end
         end,
         onmouseup = function(event)
             isDragging = false
             isPanning = false
             activePointIndex = 0
+            if dragRenderTimer then dragRenderTimer:stop() end
+            -- Guarantee one final frame with the released handle position.
+            needsUpdate = true
             dialog:repaint()
         end
     }
@@ -735,12 +890,15 @@ local function initializeMeshWarpTool()
                 local maxY = math.max(celPosition.y + newCelImage.height, finalGlobalY + finalImage.height)
                 
                 local compositeImage = Image(maxX - minX, maxY - minY, sprite.colorMode)
+                compositeImage:clear(compositeImage.bounds, transparentBackgroundColor(sprite))
                 compositeImage:drawImage(newCelImage, Point(celPosition.x - minX, celPosition.y - minY))
                 compositeImage:drawImage(finalImage, Point(finalGlobalX - minX, finalGlobalY - minY))
                 
                 cel.image = compositeImage
                 cel.position = Point(minX, minY)
             end)
+            isDialogOpen = false
+            if dragRenderTimer then dragRenderTimer:stop() end
             dialog:close()
         end
     }
@@ -748,7 +906,11 @@ local function initializeMeshWarpTool()
     dialog:button {
         id = "cancel",
         text = "Cancel",
-        onclick = function() dialog:close() end
+        onclick = function()
+            isDialogOpen = false
+            if dragRenderTimer then dragRenderTimer:stop() end
+            dialog:close()
+        end
     }
 
     dialog:show { wait = false }
