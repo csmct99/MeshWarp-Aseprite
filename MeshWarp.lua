@@ -69,41 +69,79 @@ local function calculateInverseBilinear(pointX, pointY, point1, point2, point3, 
     return nil, nil
 end
 
--- Maps an output pixel to a specific source coordinate within an arbitrary N x N grid structure.
--- Employs AABB boundary culling to ensure high grid resolutions remain performant.
-local function findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceWidth, sourceHeight)
+-- Precomputes per-cell geometry once per render: the four corners, the axis-aligned
+-- bounds used for culling, and the source-space offset of the cell. The bounds are
+-- invariant for a whole frame, so recomputing them per output pixel (as the renderer
+-- used to) is wasted work.
+local function buildGridCells(destinationPoints, gridResolution, sourceWidth, sourceHeight)
     local quadWidth = sourceWidth / gridResolution
     local quadHeight = sourceHeight / gridResolution
     local pointsPerRow = gridResolution + 1
-    
+    local cells = {}
+
     for row = 0, gridResolution - 1 do
         for column = 0, gridResolution - 1 do
             local index1 = row * pointsPerRow + column + 1
             local index2 = index1 + 1
             local index4 = (row + 1) * pointsPerRow + column + 1
             local index3 = index4 + 1
-            
+
             local point1 = destinationPoints[index1]
             local point2 = destinationPoints[index2]
             local point3 = destinationPoints[index3]
             local point4 = destinationPoints[index4]
-            
-            -- Fast Axis-Aligned Bounding Box (AABB) culling. 
-            -- Avoids running the heavy inverse bilinear math if the pixel is completely outside this specific grid cell.
-            local minimumX = math.min(point1.x, point2.x, point3.x, point4.x)
-            local maximumX = math.max(point1.x, point2.x, point3.x, point4.x)
-            local minimumY = math.min(point1.y, point2.y, point3.y, point4.y)
-            local maximumY = math.max(point1.y, point2.y, point3.y, point4.y)
-            
-            if worldX >= minimumX - 0.01 and worldX <= maximumX + 0.01 and worldY >= minimumY - 0.01 and worldY <= maximumY + 0.01 then
-                local normalizedX, normalizedY = calculateInverseBilinear(worldX, worldY, point1, point2, point3, point4)
-                if normalizedX and normalizedY then
-                    return column * quadWidth + normalizedX * quadWidth, row * quadHeight + normalizedY * quadHeight
-                end
+
+            -- Plain comparisons instead of math.min/max: this runs once per cell, and the
+            -- vararg math functions are relatively expensive interpreter-to-C calls.
+            local minimumX, maximumX = point1.x, point1.x
+            if point2.x < minimumX then minimumX = point2.x elseif point2.x > maximumX then maximumX = point2.x end
+            if point3.x < minimumX then minimumX = point3.x elseif point3.x > maximumX then maximumX = point3.x end
+            if point4.x < minimumX then minimumX = point4.x elseif point4.x > maximumX then maximumX = point4.x end
+
+            local minimumY, maximumY = point1.y, point1.y
+            if point2.y < minimumY then minimumY = point2.y elseif point2.y > maximumY then maximumY = point2.y end
+            if point3.y < minimumY then minimumY = point3.y elseif point3.y > maximumY then maximumY = point3.y end
+            if point4.y < minimumY then minimumY = point4.y elseif point4.y > maximumY then maximumY = point4.y end
+
+            cells[#cells + 1] = {
+                point1 = point1,
+                point2 = point2,
+                point3 = point3,
+                point4 = point4,
+                minimumX = minimumX,
+                maximumX = maximumX,
+                minimumY = minimumY,
+                maximumY = maximumY,
+                sourceX = column * quadWidth,
+                sourceY = row * quadHeight,
+                quadWidth = quadWidth,
+                quadHeight = quadHeight,
+            }
+        end
+    end
+
+    return cells
+end
+
+-- Maps an output pixel to a specific source coordinate within an arbitrary N x N grid structure.
+-- Employs AABB boundary culling (precomputed per cell) to ensure high grid resolutions remain performant.
+local function findSourceCoordinate(worldX, worldY, cells)
+    for cellIndex = 1, #cells do
+        local cell = cells[cellIndex]
+
+        -- Fast Axis-Aligned Bounding Box (AABB) culling.
+        -- Avoids running the heavy inverse bilinear math if the pixel is completely outside this specific grid cell.
+        if worldX >= cell.minimumX - 0.01 and worldX <= cell.maximumX + 0.01 and
+           worldY >= cell.minimumY - 0.01 and worldY <= cell.maximumY + 0.01 then
+            local normalizedX, normalizedY = calculateInverseBilinear(
+                worldX, worldY, cell.point1, cell.point2, cell.point3, cell.point4)
+            if normalizedX and normalizedY then
+                return cell.sourceX + normalizedX * cell.quadWidth,
+                       cell.sourceY + normalizedY * cell.quadHeight
             end
         end
     end
-    
+
     return nil, nil
 end
 
@@ -257,15 +295,17 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
     local isGrayscale = sourceImage.colorMode == ColorMode.GRAY
     local palette = isIndexed and app.activeSprite.palettes[1] or nil
     local transparentIndex = isIndexed and app.activeSprite.transparentColor or -1
-    
+
+    -- Destinations and their AABBs are constant for the whole frame: build them once here
+    -- instead of recomputing per output pixel.
+    local gridCells = buildGridCells(destinationPoints, gridResolution, sourceImage.width, sourceImage.height)
+
     for y = 0, outputHeight - 1 do
         for x = 0, outputWidth - 1 do
             local worldX = originX + (x + 0.5) * worldStepX
             local worldY = originY + (y + 0.5) * worldStepY
-            
-            -- The source map uses continuous coordinates, so the full image extent is passed.
-            -- Using width - 1 would compress every cell by one pixel.
-            local sampleX, sampleY = findSourceCoordinate(worldX, worldY, destinationPoints, gridResolution, sourceImage.width, sourceImage.height)
+
+            local sampleX, sampleY = findSourceCoordinate(worldX, worldY, gridCells)
             
             if sampleX and sampleY then
                 if samplingMode == "Bilinear" then
