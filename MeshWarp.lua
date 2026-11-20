@@ -235,10 +235,19 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
     -- that offset to an integer cel position, shifting the warp by a sub-pixel amount.
     local originX = math.floor(minimumX)
     local originY = math.floor(minimumY)
-    
-    local outputWidth = math.max(1, math.ceil((maximumX - originX) * renderScale))
-    local outputHeight = math.max(1, math.ceil((maximumY - originY) * renderScale))
-    
+
+    -- Extent this render covers at 100% preview resolution.
+    local nativeWidth = math.max(1, math.ceil(maximumX - originX))
+    local nativeHeight = math.max(1, math.ceil(maximumY - originY))
+
+    local outputWidth = math.max(1, math.ceil(nativeWidth * renderScale))
+    local outputHeight = math.max(1, math.ceil(nativeHeight * renderScale))
+
+    -- Sample on a grid that spans exactly the native extent, so a reduced-resolution render
+    -- is a coarser view of the same area (and never overshoots it).
+    local worldStepX = nativeWidth / outputWidth
+    local worldStepY = nativeHeight / outputHeight
+
     local isPreview = (previewAlpha ~= nil) and (previewAlpha < 255)
     local useRgbMode = isPreview or (samplingMode == "Bilinear")
     local outputImage = Image(outputWidth, outputHeight, useRgbMode and ColorMode.RGB or sourceImage.colorMode)
@@ -251,8 +260,8 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
     
     for y = 0, outputHeight - 1 do
         for x = 0, outputWidth - 1 do
-            local worldX = originX + (x + 0.5) / renderScale
-            local worldY = originY + (y + 0.5) / renderScale
+            local worldX = originX + (x + 0.5) * worldStepX
+            local worldY = originY + (y + 0.5) * worldStepY
             
             -- The source map uses continuous coordinates, so the full image extent is passed.
             -- Using width - 1 would compress every cell by one pixel.
@@ -290,7 +299,36 @@ local function renderDistortedImage(sourceImage, destinationPoints, gridResoluti
         end
     end
     
-    return outputImage, Point(originX, originY)
+    -- The native extent is the size this render would have at 100% preview resolution. The
+    -- caller needs it to place a reduced-resolution preview on the canvas pixel grid.
+    return outputImage, Point(originX, originY), nativeWidth, nativeHeight
+end
+
+-- Nearest-neighbor scale used to expand a reduced-resolution preview back to the native
+-- canvas pixel grid before it is baked into the composite. Without this step a "Preview
+-- Res %" below 100 would shrink the preview instead of making it coarser.
+local function upscaleImageNearest(sourceImage, targetWidth, targetHeight)
+    targetWidth = math.max(1, targetWidth)
+    targetHeight = math.max(1, targetHeight)
+
+    if sourceImage.width == targetWidth and sourceImage.height == targetHeight then
+        return sourceImage
+    end
+
+    local scaledImage = Image(targetWidth, targetHeight, sourceImage.colorMode)
+    local sourcePerTargetX = sourceImage.width / targetWidth
+    local sourcePerTargetY = sourceImage.height / targetHeight
+
+    for y = 0, targetHeight - 1 do
+        -- Sample at target pixel centers so the upscaled blocks stay aligned to the grid.
+        local sourceY = math.min(sourceImage.height - 1, math.floor((y + 0.5) * sourcePerTargetY))
+        for x = 0, targetWidth - 1 do
+            local sourceX = math.min(sourceImage.width - 1, math.floor((x + 0.5) * sourcePerTargetX))
+            scaledImage:drawPixel(x, y, sourceImage:getPixel(sourceX, sourceY))
+        end
+    end
+
+    return scaledImage
 end
 
 -- Helper utility to draw primitive rectangles representing interaction handles.
@@ -361,6 +399,29 @@ local function clearSelectedPixels(targetImage, sprite, selection, bounds, celPo
     end
 end
 
+-- Color that keeps uncovered pixels transparent in the sprite's color mode.
+local function transparentBackgroundColor(sprite)
+    if sprite.colorMode == ColorMode.INDEXED then
+        return Color{ index = sprite.transparentColor }
+    end
+    return Color{ r = 0, g = 0, b = 0, a = 0 }
+end
+
+-- Bounds (in canvas pixels) of the native-resolution image that holds the background art
+-- and the warped preview. Kept integral so the two share one pixel grid.
+local function calculateCompositeBounds(spriteWidth, spriteHeight, previewOffset, previewWidth, previewHeight, includeContext)
+    if includeContext then
+        return math.min(0, previewOffset.x),
+               math.min(0, previewOffset.y),
+               math.max(spriteWidth, previewOffset.x + previewWidth),
+               math.max(spriteHeight, previewOffset.y + previewHeight)
+    end
+    return previewOffset.x,
+           previewOffset.y,
+           previewOffset.x + previewWidth,
+           previewOffset.y + previewHeight
+end
+
 -- The main entry point for the extension.
 local function initializeMeshWarpTool()
     local sprite = app.activeSprite
@@ -409,10 +470,15 @@ local function initializeMeshWarpTool()
     local needsUpdate = true
     local previewImage = nil
     local previewOffset = Point(0,0)
+    -- Size the preview occupies on the canvas grid (i.e. its size at 100% preview resolution).
+    local previewNativeWidth = 1
+    local previewNativeHeight = 1
 
     local rawContextImage = nil
-    local scaledContextImage = nil
-    local lastContextScale = 0
+    -- The preview is baked into the background art at native resolution, so both are
+    -- rasterized as one bitmap and therefore share the same pixel grid on screen.
+    local compositeImage = nil
+    local compositeOffset = Point(0, 0)
 
     app.transaction("Temp Capture Context", function()
         local tempCelImage = cel.image:clone()
@@ -461,24 +527,33 @@ local function initializeMeshWarpTool()
         return globalX, globalY
     end
 
-    local function getScaledContext()
-        if not scaledContextImage or lastContextScale ~= viewScale then
-            local scaledWidth = math.max(1, math.floor(sprite.width * viewScale))
-            local scaledHeight = math.max(1, math.floor(sprite.height * viewScale))
-            scaledContextImage = Image(scaledWidth, scaledHeight, sprite.colorMode)
-            
-            for y = 0, scaledHeight - 1 do
-                for x = 0, scaledWidth - 1 do
-                    local sourceX = math.floor(x / viewScale)
-                    local sourceY = math.floor(y / viewScale)
-                    if sourceX >= 0 and sourceX < sprite.width and sourceY >= 0 and sourceY < sprite.height then
-                        scaledContextImage:drawPixel(x, y, rawContextImage:getPixel(sourceX, sourceY))
-                    end
-                end
-            end
-            lastContextScale = viewScale
+    -- Bakes the warped preview into the background art at native (canvas-pixel) resolution.
+    -- Both are canvas-aligned with integer offsets, so this copy is 1:1 and exact; the
+    -- result is drawn to the dialog in a single blit, which keeps the warp and the art on
+    -- the same pixel grid regardless of view scale, camera zoom or integer rounding.
+    local function rebuildComposite()
+        -- Expand the (possibly reduced-resolution) preview onto the native canvas grid so
+        -- it occupies exactly the same world extent at any "Preview Res %" setting.
+        local nativePreview = upscaleImageNearest(previewImage, previewNativeWidth, previewNativeHeight)
+
+        local compositeMinX, compositeMinY, compositeMaxX, compositeMaxY = calculateCompositeBounds(
+            sprite.width, sprite.height, previewOffset,
+            nativePreview.width, nativePreview.height, showContext)
+
+        compositeOffset = Point(compositeMinX, compositeMinY)
+        -- Match the preview's color mode so a semi-transparent or bilinear preview is not
+        -- quantized into the sprite palette before it is displayed.
+        compositeImage = Image(compositeMaxX - compositeMinX,
+                               compositeMaxY - compositeMinY,
+                               nativePreview.colorMode)
+        compositeImage:clear(compositeImage.bounds, transparentBackgroundColor(sprite))
+
+        if showContext then
+            compositeImage:drawImage(rawContextImage, Point(-compositeMinX, -compositeMinY))
         end
-        return scaledContextImage
+        -- Preview alpha (opacity) is already baked into the preview, so blend at 255.
+        compositeImage:drawImage(nativePreview, Point(previewOffset.x - compositeMinX,
+                                                      previewOffset.y - compositeMinY))
     end
 
     updateViewMetrics()
@@ -554,43 +629,37 @@ local function initializeMeshWarpTool()
             local backgroundHeight = backgroundBottom - backgroundY
 
             drawTransparencyCheckerboard(graphicsContext, backgroundX, backgroundY, backgroundWidth, backgroundHeight, 10 * cameraZoom)
-            if showContext then
-                local contextImage = getScaledContext()
-                graphicsContext:drawImage(
-                    contextImage, 
-                    Rectangle(0, 0, contextImage.width, contextImage.height),
-                    Rectangle(math.floor(backgroundX), math.floor(backgroundY), math.floor(backgroundWidth), math.floor(backgroundHeight))
-                )
-            end
 
             local currentAlpha = (dialog.data and dialog.data.previewOpacity) or 255
             local currentScale = (dialog.data and dialog.data.previewScale) or 100
             local renderScale = currentScale / 100.0
 
             if needsUpdate then
-                previewImage, previewOffset = renderDistortedImage(sourceImage, destinationPoints, currentGridResolution, currentAlpha, samplingMode, renderScale)
+                previewImage, previewOffset, previewNativeWidth, previewNativeHeight =
+                    renderDistortedImage(sourceImage, destinationPoints, currentGridResolution, currentAlpha, samplingMode, renderScale)
+                rebuildComposite()
                 needsUpdate = false
             end
 
-            if previewImage then
-                local drawScale = 1.0 / renderScale
-                local mathGlobalX = previewOffset.x
-                local mathGlobalY = previewOffset.y
-                local mathGlobalWidth = previewImage.width * drawScale
-                local mathGlobalHeight = previewImage.height * drawScale
-                
-                local previewUiX, previewUiY = globalToUi(mathGlobalX, mathGlobalY)
-                local previewUiRight, previewUiBottom = globalToUi(mathGlobalX + mathGlobalWidth, mathGlobalY + mathGlobalHeight)
-                
-                local drawX = math.floor(previewUiX)
-                local drawY = math.floor(previewUiY)
-                local drawWidth = math.max(1, math.floor(previewUiRight - previewUiX + 0.5))
-                local drawHeight = math.max(1, math.floor(previewUiBottom - previewUiY + 0.5))
-                
+            if compositeImage then
+                local compositeUiX, compositeUiY = globalToUi(compositeOffset.x, compositeOffset.y)
+                local compositeUiRight, compositeUiBottom = globalToUi(
+                    compositeOffset.x + compositeImage.width,
+                    compositeOffset.y + compositeImage.height)
+
+                -- Round both edges from the same transform so the single bitmap lands as
+                -- close to the canvas grid as an integer blit allows.
+                local drawX = math.floor(compositeUiX + 0.5)
+                local drawY = math.floor(compositeUiY + 0.5)
+                local drawRight = math.floor(compositeUiRight + 0.5)
+                local drawBottom = math.floor(compositeUiBottom + 0.5)
+
                 graphicsContext:drawImage(
-                    previewImage, 
-                    Rectangle(0, 0, previewImage.width, previewImage.height), 
-                    Rectangle(drawX, drawY, drawWidth, drawHeight)
+                    compositeImage,
+                    Rectangle(0, 0, compositeImage.width, compositeImage.height),
+                    Rectangle(drawX, drawY,
+                              math.max(1, drawRight - drawX),
+                              math.max(1, drawBottom - drawY))
                 )
             end
 
@@ -743,6 +812,7 @@ local function initializeMeshWarpTool()
                 local maxY = math.max(celPosition.y + newCelImage.height, finalGlobalY + finalImage.height)
                 
                 local compositeImage = Image(maxX - minX, maxY - minY, sprite.colorMode)
+                compositeImage:clear(compositeImage.bounds, transparentBackgroundColor(sprite))
                 compositeImage:drawImage(newCelImage, Point(celPosition.x - minX, celPosition.y - minY))
                 compositeImage:drawImage(finalImage, Point(finalGlobalX - minX, finalGlobalY - minY))
                 
